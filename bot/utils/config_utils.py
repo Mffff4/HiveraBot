@@ -24,9 +24,12 @@ def read_config_file(config_path: str) -> Dict:
 async def write_config_file(content: dict, config_path: str) -> None:
     lock = AsyncInterProcessLock(path.join(path.dirname(config_path), 'lock_files', 'accounts_config.lock'))
     async with lock:
-        with open(config_path, 'w+') as file:
-            json.dump(content, file, indent=2)
-        await asyncio.sleep(0.1)
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(content, f, indent=4, ensure_ascii=False)
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Failed to write config file: {str(e)}")
 
 
 def get_session_config(session_name: str, config_path: str) -> Dict:
@@ -38,9 +41,7 @@ async def update_session_config_in_file(session_name: str, session_config: Dict,
     try:
         config = read_config_file(config_path)
         config[session_name] = session_config
-        
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
+        await write_config_file(config, config_path)
     except Exception as e:
         logger.error(f"Failed to update session config: {str(e)}")
 

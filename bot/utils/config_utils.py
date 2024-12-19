@@ -1,19 +1,23 @@
 import asyncio
 import json
-from bot.utils import logger, log_error, AsyncInterProcessLock
+from bot.utils import logger, AsyncInterProcessLock
 from opentele.api import API
 from os import path, remove
 from copy import deepcopy
+from typing import Dict
 
 
-def read_config_file(config_path: str) -> dict:
+def read_config_file(config_path: str) -> Dict:
     try:
-        with open(config_path, 'r') as file:
-            content = file.read()
-            return json.loads(content) if content else {}
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
     except FileNotFoundError:
-        with open(config_path, 'w'):
-            logger.warning(f"Accounts config file `{config_path}` not found. Creating a new one.")
+        return {}
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse config file: {config_path}")
+        return {}
+    except Exception as e:
+        logger.error(f"Error reading config file: {str(e)}")
         return {}
 
 
@@ -25,14 +29,20 @@ async def write_config_file(content: dict, config_path: str) -> None:
         await asyncio.sleep(0.1)
 
 
-def get_session_config(session_name: str, config_path: str) -> dict:
-    return read_config_file(config_path).get(session_name, {})
-
-
-async def update_session_config_in_file(session_name: str, updated_session_config: dict, config_path: str) -> None:
+def get_session_config(session_name: str, config_path: str) -> Dict:
     config = read_config_file(config_path)
-    config[session_name] = updated_session_config
-    await write_config_file(config, config_path)
+    return config.get(session_name, {})
+
+
+async def update_session_config_in_file(session_name: str, session_config: Dict, config_path: str) -> None:
+    try:
+        config = read_config_file(config_path)
+        config[session_name] = session_config
+        
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Failed to update session config: {str(e)}")
 
 
 async def restructure_config(config_path: str) -> None:

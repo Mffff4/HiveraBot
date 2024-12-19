@@ -2,11 +2,10 @@ import asyncio
 import json
 from bot.utils import logger, AsyncInterProcessLock
 from opentele.api import API
-from os import path, remove
+from os import path, remove, makedirs
 from copy import deepcopy
 from typing import Dict
-
-
+import os   
 def read_config_file(config_path: str) -> Dict:
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -22,6 +21,8 @@ def read_config_file(config_path: str) -> Dict:
 
 
 async def write_config_file(content: dict, config_path: str) -> None:
+    makedirs(os.path.dirname(config_path), exist_ok=True)
+    
     lock = AsyncInterProcessLock(path.join(path.dirname(config_path), 'lock_files', 'accounts_config.lock'))
     async with lock:
         try:

@@ -137,13 +137,18 @@ class BaseBot:
 
     async def make_request(self, method: str, url: str, **kwargs) -> Optional[Dict]:
         if not self._http_client:
-            raise InvalidSession("❌ HTTP client not initialized")
+            raise InvalidSession("HTTP client not initialized")
 
         headers = HIVERA_HEADERS.copy()
 
         if 'headers' in kwargs:
             headers.update(kwargs.pop('headers'))
         kwargs['headers'] = headers
+
+        IGNORED_ERRORS = [
+            "invalid invite code",
+            "locking status",
+        ]
 
         try:
             async with getattr(self._http_client, method.lower())(url, **kwargs) as response:
@@ -170,9 +175,13 @@ class BaseBot:
                                 return result
                             else:
                                 retry_error = await retry_response.text()
-                                logger.error(f"❌ {self.session_name} | Retry failed with status {retry_response.status}: {retry_error}")
+                                should_log = not any(err in retry_error.lower() for err in IGNORED_ERRORS)
+                                if should_log:
+                                    logger.error(f"❌ {self.session_name} | Retry failed with status {retry_response.status}: {retry_error}")
                     else:
-                        logger.error(f"❌ {self.session_name} | Request failed with status 400: {error_text}")
+                        should_log = not any(err in error_text.lower() for err in IGNORED_ERRORS)
+                        if should_log:
+                            logger.error(f"❌ {self.session_name} | Request failed with status 400: {error_text}")
                     return None
                 else:
                     error_text = await response.text()
@@ -215,7 +224,7 @@ class BaseBot:
         try:
             profile_data = await self.fetch_auth_data()
             if not profile_data:
-                raise InvalidSession("❌ Failed to fetch auth data")
+                raise InvalidSession("Failed to fetch auth data")
 
             self._username = profile_data.get("result", {}).get("username", "Unknown")
             await self.activate_referral()
@@ -224,18 +233,12 @@ class BaseBot:
             while True:
                 power_data = await self.fetch_power_data()
                 if not power_data:
-                    raise InvalidSession("❌ Failed to fetch power data")
+                    raise InvalidSession("Failed to fetch power data")
 
                 profile = power_data.get("result", {}).get("profile", {})
                 self._hivera = profile.get("HIVERA", 0)
                 self._power = profile.get("POWER", 0)
-
-                logger.info(
-                    f"🔍 {self.session_name} | "
-                    f"Username: {self._username} | "
-                    f"Hivera: {self._hivera} | "
-                    f"Power: {self._power}"
-                )
+                power_capacity = profile.get("POWER_CAPACITY", 0)
 
                 if self._power <= 500:
                     delay = uniform(settings.POWER_RESTORE_DELAY[0], settings.POWER_RESTORE_DELAY[1])
@@ -251,7 +254,14 @@ class BaseBot:
                 if contribute_data:
                     profile = contribute_data.get("result", {}).get("profile", {})
                     self._power = profile.get("POWER", 0)
-                    logger.info(f"✅ {self.session_name} | Mining successful: {profile}")
+                    self._hivera = profile.get("HIVERA", 0)
+                    logger.info(
+                        f"✅ {self.session_name} | "
+                        f"Mining successful | "
+                        f"Username: {self._username} | "
+                        f"Hivera: {self._hivera} | "
+                        f"Power: {self._power}/{power_capacity}"
+                    )
                     await asyncio.sleep(uniform(settings.MINING_DELAY[0], settings.MINING_DELAY[1]))
 
         except InvalidSession as e:

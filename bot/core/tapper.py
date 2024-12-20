@@ -238,10 +238,10 @@ class BaseBot:
                 if not power_data:
                     raise InvalidSession("Failed to fetch power data")
 
-                profile = power_data.get("result", {}).get("profile", {})
-                self._hivera = profile.get("HIVERA", 0)
-                self._power = profile.get("POWER", 0)
-                power_capacity = profile.get("POWER_CAPACITY", 0)
+                result = power_data.get("result", {})
+                self._hivera = result.get("HIVERA", 0)
+                self._power = result.get("POWER", 0)
+                power_capacity = result.get("POWER_CAPACITY", 0)
 
                 if self._power == last_power:
                     stuck_counter += 1
@@ -250,23 +250,20 @@ class BaseBot:
                     
                 last_power = self._power
 
-                if stuck_counter >= 3:
+                if stuck_counter >= 2:
                     logger.warning(
                         f"⚠️ {self.session_name} | "
-                        f"Power stuck at {self._power}. Forcing data refresh..."
+                        f"Power stuck at {self._power}. Refreshing data..."
                     )
-                    self._init_data = None
-                    await self.get_tg_web_data()
                     await asyncio.sleep(5)
                     stuck_counter = 0
                     continue
 
                 if self._power <= 500:
-                    delay = 30
+                    delay = uniform(45, 60)
                     logger.warning(
                         f"⚠️ {self.session_name} | "
-                        f"User {self._username} | Power: {self._power}/{power_capacity} | "
-                        f"Checking again in {delay} seconds"
+                        f"User {self._username} | Power: {self._power}/{power_capacity}"
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -328,7 +325,7 @@ class BaseBot:
         if not self._init_data:
             await self.get_tg_web_data()
 
-        url = f"{self.API_URL}engine/info?auth_data={self._init_data}&_t={int(time() * 1000)}"
+        url = f"{self.API_URL}users/powers?auth_data={self._init_data}"
         return await self.make_request("GET", url)
 
     def _generate_payload(self) -> Dict[str, Union[int, float]]:

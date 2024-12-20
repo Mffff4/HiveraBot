@@ -156,6 +156,13 @@ class BaseBot:
             headers.update(kwargs.pop('headers'))
         kwargs['headers'] = headers
 
+        # Ошибки, которые мы считаем допустимыми
+        VALID_ERRORS = {
+            "insufficient power",
+            "invalid invite code",
+            "locking status"
+        }
+
         max_retries = 3
         retry_delay = 10
 
@@ -217,7 +224,12 @@ class BaseBot:
                     if hasattr(self._http_client, 'cookie_jar'):
                         self._http_client.cookie_jar.update_cookies(response.cookies)
 
-                    if response.status != 200 and (not result or "error" not in result or result["error"] != "insufficient power"):
+                    # Считаем ответ валидным если это одна из обрабатываемых ошибок
+                    if response.status != 200 and (
+                        not result or 
+                        "error" not in result or 
+                        result["error"] not in VALID_ERRORS
+                    ):
                         logger.error(f"❌ {self.session_name} | Request failed with status {response.status}: {response_text}")
                         return None
 
@@ -290,7 +302,8 @@ class BaseBot:
                     continue
 
                 if "error" in contribute_data:
-                    if contribute_data["error"] == "insufficient power":
+                    error = contribute_data["error"]
+                    if error == "insufficient power":
                         restore_delay = uniform(
                             settings.POWER_RESTORE_DELAY[0],
                             settings.POWER_RESTORE_DELAY[1]
@@ -303,8 +316,14 @@ class BaseBot:
                             f"Next mining at: {next_mining_time.strftime('%H:%M:%S')}"
                         )
                         await asyncio.sleep(restore_delay)
+                    elif error == "locking status":
+                        logger.warning(f"⚠️ {self.session_name} | Account is locked, waiting 60s")
+                        await asyncio.sleep(60)
+                    elif error == "invalid invite code":
+                        logger.debug(f"📝 {self.session_name} | Invalid invite code, continuing")
+                        continue
                     else:
-                        logger.error(f"❌ {self.session_name} | Mining error: {contribute_data['error']}")
+                        logger.error(f"❌ {self.session_name} | Mining error: {error}")
                         await asyncio.sleep(10)
                 else:
                     logger.success(

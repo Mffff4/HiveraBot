@@ -387,7 +387,7 @@ class BaseBot:
             missions_data = await self.fetch_missions()
             if missions_data and "result" in missions_data:
                 for mission in missions_data["result"]:
-                    if mission["type"] in ["invite_friend"]:
+                    if mission["type"] in ["invite_friend", "buy_coffee"]:
                         continue
 
                     if not mission["complete"]:
@@ -399,7 +399,7 @@ class BaseBot:
             daily_tasks = await self.fetch_daily_tasks()
             if daily_tasks and "result" in daily_tasks:
                 for task in daily_tasks["result"]:
-                    if task["type"] == "restore_power":
+                    if task["type"] in ["restore_power", "buy_coffee"]:
                         continue
 
                     if not task["complete"]:

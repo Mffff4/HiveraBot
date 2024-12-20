@@ -19,6 +19,13 @@ class Logger:
     def _get_timestamp() -> str:
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+    def debug(self, message: str) -> None:
+        if settings.DEBUG_LOGGING:
+            console.print(
+                f"[timestamp]{self._get_timestamp()}[/timestamp]"
+                f" | [info]DEBUG[/info]    | {message}"
+            )
+
     def info(self, message: str) -> None:
         console.print(
             f"[timestamp]{self._get_timestamp()}[/timestamp]"

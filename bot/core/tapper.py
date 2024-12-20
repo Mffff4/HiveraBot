@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import shutil
 from datetime import datetime
+import traceback
 
 from bot.utils.universal_telegram_client import UniversalTelegramClient
 from bot.utils.proxy_utils import check_proxy, get_working_proxy
@@ -384,7 +385,6 @@ class BaseBot:
         url = f"{self.API_URL}daily-tasks/complete?task_id={task_id}&auth_data={self._init_data}"
         result = await self.make_request("GET", url)
         return result is not None and result.get("result") == "done"
-
     async def process_missions(self) -> None:
         try:
             missions_data = await self.fetch_missions()
@@ -392,53 +392,120 @@ class BaseBot:
                 logger.warning(f"⚠️ {self.session_name} | Failed to fetch missions data")
                 return
 
-            for mission in missions_data["result"]:
+            logger.debug(f"📝 {self.session_name} | Received missions data: {json.dumps(missions_data, indent=2)}")
+
+            for mission in missions_data.get("result", []):
                 try:
+                    if not isinstance(mission, dict):
+                        logger.warning(f"⚠️ {self.session_name} | Invalid mission format: {mission}")
+                        continue
+
+                    mission_name = mission.get("name", "Unknown")
+                    mission_type = mission.get("type")
+                    mission_complete = mission.get("complete")
+                    mission_cost = mission.get("cost")
+
+                    logger.debug(
+                        f"📝 {self.session_name} | Processing mission: "
+                        f"name={mission_name}, "
+                        f"type={mission_type}, "
+                        f"complete={mission_complete}, "
+                        f"cost={mission_cost}"
+                    )
+
                     if (
-                        mission.get("type") in ["invite_friend", "donation"] or
-                        "Buy Hivera" in mission.get("name", "") or
-                        mission.get("cost", {}).get("TON") is not None
+                        mission_type in ["invite_friend", "donation"] or
+                        "Buy Hivera" in mission_name or
+                        (mission_cost and mission_cost.get("TON") is not None) or
+                        mission_complete is True
                     ):
                         continue
 
-                    if not mission.get("complete", True):
-                        mission_id = mission.get("id")
-                        if not mission_id:
-                            continue
-                            
-                        result = await self.complete_mission(mission_id)
-                        if result:
-                            logger.info(f"✅ {self.session_name} | Completed mission {mission.get('name', 'Unknown')}")
-                            await asyncio.sleep(uniform(settings.MISSION_DELAY[0], settings.MISSION_DELAY[1]))
+                    mission_id = mission.get("id")
+                    if mission_id is None:
+                        logger.warning(f"⚠️ {self.session_name} | Missing mission ID for {mission_name}")
+                        continue
+
+                    result = await self.complete_mission(mission_id)
+                    if result:
+                        logger.info(
+                            f"✅ {self.session_name} | "
+                            f"Completed mission: {mission_name} | "
+                            f"Reward: {mission.get('reward', {})}"
+                        )
+                        await asyncio.sleep(uniform(
+                            settings.MISSION_DELAY[0], 
+                            settings.MISSION_DELAY[1]
+                        ))
+
                 except Exception as mission_error:
-                    logger.error(f"❌ {self.session_name} | Error processing mission {mission.get('name', 'Unknown')}: {str(mission_error)}")
+                    logger.error(
+                        f"❌ {self.session_name} | "
+                        f"Error processing mission {mission.get('name', 'Unknown')}: "
+                        f"{str(mission_error)}\n"
+                        f"Mission data: {json.dumps(mission, indent=2)}"
+                    )
                     continue
 
             daily_tasks = await self.fetch_daily_tasks()
             if not daily_tasks or "result" not in daily_tasks:
-                logger.warning(f"⚠️ {self.session_name} | Failed to fetch daily tasks data")
+                logger.warning(f"⚠️ {self.session_name} | Failed to fetch daily tasks")
                 return
 
-            for task in daily_tasks["result"]:
+            logger.debug(f"📝 {self.session_name} | Received daily tasks: {json.dumps(daily_tasks, indent=2)}")
+
+            for task in daily_tasks.get("result", []):
                 try:
-                    if task.get("type") == "restore_power":
+                    if not isinstance(task, dict):
+                        logger.warning(f"⚠️ {self.session_name} | Invalid task format: {task}")
                         continue
 
-                    if not task.get("complete", True):
-                        task_id = task.get("id")
-                        if not task_id:
-                            continue
-                            
-                        result = await self.complete_daily_task(task_id)
-                        if result:
-                            logger.info(f"✅ {self.session_name} | Completed daily task {task.get('name', 'Unknown')}")
-                            await asyncio.sleep(uniform(settings.MISSION_DELAY[0], settings.MISSION_DELAY[1]))
+                    task_name = task.get("name", "Unknown")
+                    task_type = task.get("type")
+                    task_complete = task.get("complete")
+
+                    logger.debug(
+                        f"📝 {self.session_name} | Processing task: "
+                        f"name={task_name}, "
+                        f"type={task_type}, "
+                        f"complete={task_complete}"
+                    )
+
+                    if task_type == "restore_power" or task_complete is True:
+                        continue
+
+                    task_id = task.get("id")
+                    if task_id is None:
+                        logger.warning(f"⚠️ {self.session_name} | Missing task ID for {task_name}")
+                        continue
+
+                    result = await self.complete_daily_task(task_id)
+                    if result:
+                        logger.info(
+                            f"✅ {self.session_name} | "
+                            f"Completed daily task: {task_name} | "
+                            f"Reward: {task.get('reward', {})}"
+                        )
+                        await asyncio.sleep(uniform(
+                            settings.MISSION_DELAY[0],
+                            settings.MISSION_DELAY[1]
+                        ))
+
                 except Exception as task_error:
-                    logger.error(f"❌ {self.session_name} | Error processing daily task {task.get('name', 'Unknown')}: {str(task_error)}")
+                    logger.error(
+                        f"❌ {self.session_name} | "
+                        f"Error processing daily task {task.get('name', 'Unknown')}: "
+                        f"{str(task_error)}\n"
+                        f"Task data: {json.dumps(task, indent=2)}"
+                    )
                     continue
 
         except Exception as e:
-            logger.error(f"❌ {self.session_name} | Error processing missions: {str(e)}")
+            logger.error(
+                f"❌ {self.session_name} | "
+                f"Error processing missions: {str(e)}\n"
+                f"Traceback: {traceback.format_exc()}"
+            )
 
     async def activate_referral(self) -> None:
         if not self._init_data:

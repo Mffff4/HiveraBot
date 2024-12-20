@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     CHECK_UPDATE_INTERVAL: int = 300
     BLACKLISTED_SESSIONS: str = ""
 
-    POWER_RESTORE_DELAY: Tuple[int, int] = (15 * 60, 45 * 60)
+    POWER_RESTORE_DELAY: Tuple[int, int] = (15 * 60, 60 * 60)
     MINING_DELAY: Tuple[int, int] = (10, 30)
     MISSION_DELAY: Tuple[int, int] = (5, 10)
 

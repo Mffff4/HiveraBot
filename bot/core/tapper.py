@@ -10,7 +10,7 @@ from time import time
 import json
 from pathlib import Path
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 
 from bot.utils.universal_telegram_client import UniversalTelegramClient
@@ -42,6 +42,7 @@ class BaseBot:
         self._hivera: Optional[int] = None
         self._username: Optional[str] = None
         self._user_data: Optional[Dict] = None
+        self._user_agent: Optional[str] = None
         self.lock = asyncio.Lock()
 
         session_config = config_utils.get_session_config(self.session_name, CONFIG_PATH)
@@ -50,10 +51,16 @@ class BaseBot:
             exit(-1)
 
         self.proxy = session_config.get('proxy')
+        self._user_agent = session_config.get('user_agent')
+        
         if self.proxy:
             proxy = Proxy.from_str(self.proxy)
             self.tg_client.set_proxy(proxy)
             self._current_proxy = self.proxy
+
+        self._last_power_check = None
+        self._last_power_value = None
+        self._power_restore_rate = 4.0
 
     def get_ref_id(self) -> str:
         if self._current_ref_id is None:
@@ -90,14 +97,10 @@ class BaseBot:
                 }
 
                 tg_web_data = webview_url.split('tgWebAppData=')[1].split('&tgWebAppVersion')[0]
-
-                final_url = (
-                    f"https://app.hivera.org/?tgWebAppStartParam={self.get_ref_id()}"
-                    f"#tgWebAppData={tg_web_data}"
-                    f"&tgWebAppVersion=8.0"
-                    f"&tgWebAppPlatform=android"
-                    f"&tgWebAppThemeParams={json.dumps(theme_params)}"
-                )
+                
+                if not '%' in tg_web_data:
+                    tg_web_data = urlencode({'auth_data': tg_web_data})
+                    tg_web_data = tg_web_data.split('auth_data=')[1]
 
                 self._init_data = tg_web_data
                 return tg_web_data
@@ -136,61 +139,104 @@ class BaseBot:
             logger.error(f"❌ Session initialization error: {str(e)}")
             return False
 
-    async def make_request(self, method: str, url: str, **kwargs) -> Optional[Dict]:
+    async def make_request(self, method: str, url: str, skip_cache: bool = False, **kwargs) -> Optional[Dict]:
         if not self._http_client:
             raise InvalidSession("HTTP client not initialized")
 
         headers = HIVERA_HEADERS.copy()
+        
+        if skip_cache:
+            headers.update({
+                'cache-control': 'no-cache, no-store, must-revalidate',
+                'pragma': 'no-cache',
+                'expires': '0'
+            })
 
         if 'headers' in kwargs:
             headers.update(kwargs.pop('headers'))
         kwargs['headers'] = headers
 
-        IGNORED_ERRORS = [
-            "invalid invite code",
-            "locking status",
-        ]
+        max_retries = 3
+        retry_delay = 10
 
-        try:
-            async with getattr(self._http_client, method.lower())(url, **kwargs) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    if "auth?" in url and result:
-                        self._user_data = result
-                        self._username = result.get("result", {}).get("username", "Unknown")
+        for attempt in range(max_retries):
+            try:
+                if "auth_data=" in url and not '%' in url:
+                    parts = url.split("auth_data=")
+                    url = f"{parts[0]}auth_data={urlencode({'data': parts[1]}).split('data=')[1]}"
+
+                if settings.DEBUG_LOGGING:
+                    logger.debug(
+                        f"📝 {self.session_name} | Making request:\n"
+                        f"Method: {method}\n"
+                        f"URL: {url}\n"
+                        f"Headers: {json.dumps(headers, indent=2)}\n"
+                        f"Args: {json.dumps(kwargs, indent=2)}"
+                    )
+
+                async with getattr(self._http_client, method.lower())(url, **kwargs) as response:
+                    response_text = await response.text()
+                    
+                    if settings.DEBUG_LOGGING:
+                        logger.debug(
+                            f"📝 {self.session_name} | Response:\n"
+                            f"Status: {response.status}\n"
+                            f"Headers: {json.dumps(dict(response.headers), indent=2)}\n"
+                            f"Cookies: {response.cookies}\n"
+                            f"Body: {response_text}"
+                        )
+
+                    if "Error 1015" in response_text or "You are being rate limited" in response_text:
+                        if attempt < max_retries - 1:
+                            delay = retry_delay * (attempt + 1)
+                            logger.warning(
+                                f"⚠️ {self.session_name} | "
+                                f"Cloudflare rate limit detected (attempt {attempt + 1}/{max_retries}). "
+                                f"Waiting {delay}s before retry..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(f"❌ {self.session_name} | Cloudflare rate limit persists after {max_retries} attempts")
+                            return None
+
+                    try:
+                        result = json.loads(response_text) if response_text else None
+                    except json.JSONDecodeError:
+                        if "<!DOCTYPE html>" in response_text:
+                            logger.error(f"❌ {self.session_name} | Received HTML instead of JSON, possible Cloudflare block")
+                            if attempt < max_retries - 1:
+                                delay = retry_delay * (attempt + 1)
+                                logger.warning(f"⚠️ {self.session_name} | Retrying in {delay}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                        else:
+                            logger.error(f"❌ {self.session_name} | Failed to parse JSON response")
+                        return None
+
+                    if hasattr(self._http_client, 'cookie_jar'):
+                        self._http_client.cookie_jar.update_cookies(response.cookies)
+
+                    if response.status != 200 and (not result or "error" not in result or result["error"] != "insufficient power"):
+                        logger.error(f"❌ {self.session_name} | Request failed with status {response.status}: {response_text}")
+                        return None
+
                     return result
-                elif response.status == 400:
-                    error_text = await response.text()
-                    if "auth_data=" in url:
-                        old_init_data = self._init_data
-                        self._init_data = None
-                        await self.get_tg_web_data()
-                        new_url = url.replace(old_init_data, self._init_data)
 
-                        async with getattr(self._http_client, method.lower())(new_url, **kwargs) as retry_response:
-                            if retry_response.status == 200:
-                                result = await retry_response.json()
-                                if "auth?" in new_url and result:
-                                    self._user_data = result
-                                    self._username = result.get("result", {}).get("username", "Unknown")
-                                return result
-                            else:
-                                retry_error = await retry_response.text()
-                                should_log = not any(err in retry_error.lower() for err in IGNORED_ERRORS)
-                                if should_log:
-                                    logger.error(f"❌ {self.session_name} | Retry failed with status {retry_response.status}: {retry_error}")
-                    else:
-                        should_log = not any(err in error_text.lower() for err in IGNORED_ERRORS)
-                        if should_log:
-                            logger.error(f"❌ {self.session_name} | Request failed with status 400: {error_text}")
-                    return None
-                else:
-                    error_text = await response.text()
-                    logger.error(f"❌ {self.session_name} | Request failed with status {response.status}: {error_text}")
-                    return None
-        except Exception as e:
-            logger.error(f"❌ {self.session_name} | Request error: {str(e)}")
-            return None
+            except aiohttp.ClientError as e:
+                logger.error(f"❌ {self.session_name} | Network error: {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                return None
+            except Exception as e:
+                logger.error(f"❌ {self.session_name} | Request error: {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                return None
+
+        return None
 
     async def run(self) -> None:
         if not await self.initialize_session():
@@ -231,78 +277,50 @@ class BaseBot:
             await self.activate_referral()
             missions_task = asyncio.create_task(self.process_missions())
 
-            last_power = 0
-            last_check_time = time()
-            
+            activities_task = None
+
             while True:
-                power_data = await self.fetch_power_data()
-                if not power_data:
-                    raise InvalidSession("Failed to fetch power data")
-
-                result = power_data.get("result", {})
-                self._hivera = result.get("HIVERA", 0)
-                self._power = result.get("POWER", 0)
-                power_capacity = result.get("POWER_CAPACITY", 0)
-
-                current_time = time()
-                time_passed = current_time - last_check_time
-                expected_power_gain = int(time_passed * 4)  # 4 энергии в секунду
-                
-                # Проверяем, растет ли энергия как ожидается
-                actual_power_gain = self._power - last_power
-                if actual_power_gain < expected_power_gain - 10:  # Допускаем погрешность в 10 единиц
-                    logger.warning(
-                        f"⚠️ {self.session_name} | "
-                        f"Power gain slower than expected: got {actual_power_gain}, expected {expected_power_gain}"
-                    )
-                    await asyncio.sleep(5)
-                    last_check_time = current_time
-                    last_power = self._power
-                    continue
-
-                last_power = self._power
-                last_check_time = current_time
-
-                if self._power <= 500:
-                    # Рассчитываем время до достижения 501 энергии
-                    power_needed = 501 - self._power
-                    delay = power_needed / 4 + 1  # +1 секунда для надежности
-                    delay = min(delay, 120)  # Максимальная задержка 2 минуты
-                    
-                    logger.warning(
-                        f"⚠️ {self.session_name} | "
-                        f"User {self._username} | Power: {self._power}/{power_capacity}"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
+                if activities_task is None or activities_task.done():
+                    activities_task = asyncio.create_task(self.send_activities())
 
                 contribute_data = await self.contribute()
-                if contribute_data:
-                    profile = contribute_data.get("result", {}).get("profile", {})
-                    self._power = profile.get("POWER", 0)
-                    self._hivera = profile.get("HIVERA", 0)
-                    logger.info(
+                if not contribute_data:
+                    logger.error(f"❌ {self.session_name} | Failed to get contribute data")
+                    await asyncio.sleep(10)
+                    continue
+
+                if "error" in contribute_data:
+                    if contribute_data["error"] == "insufficient power":
+                        restore_delay = uniform(
+                            settings.POWER_RESTORE_DELAY[0],
+                            settings.POWER_RESTORE_DELAY[1]
+                        )
+                        next_mining_time = datetime.now() + timedelta(seconds=restore_delay)
+                        logger.warning(
+                            f"⚠️ {self.session_name} | "
+                            f"Power: {self._power}/{self._power_capacity} | "
+                            f"Insufficient power, waiting {int(restore_delay)}s | "
+                            f"Next mining at: {next_mining_time.strftime('%H:%M:%S')}"
+                        )
+                        await asyncio.sleep(restore_delay)
+                    else:
+                        logger.error(f"❌ {self.session_name} | Mining error: {contribute_data['error']}")
+                        await asyncio.sleep(10)
+                else:
+                    logger.success(
                         f"✅ {self.session_name} | "
                         f"Mining successful | "
                         f"Username: {self._username} | "
                         f"Hivera: {self._hivera} | "
-                        f"Power: {self._power}/{power_capacity}"
+                        f"Power: {self._power}/{self._power_capacity}"
                     )
                     await asyncio.sleep(uniform(settings.MINING_DELAY[0], settings.MINING_DELAY[1]))
 
         except InvalidSession as e:
-            logger.error(
-                f"❌ {self.session_name} | "
-                f"Username: {self._username or 'Unknown'} | "
-                f"Error: {str(e)}"
-            )
+            logger.error(f"❌ {self.session_name} | Username: {self._username or 'Unknown'} | Error: {str(e)}")
             raise
         except Exception as e:
-            logger.error(
-                f"❌ {self.session_name} | "
-                f"Username: {self._username or 'Unknown'} | "
-                f"Error: {str(e)}"
-            )
+            logger.error(f"❌ {self.session_name} | Username: {self._username or 'Unknown'} | Error: {str(e)}")
             await asyncio.sleep(60)
 
     async def fetch_auth_data(self) -> Optional[Dict[str, Any]]:
@@ -327,34 +345,6 @@ class BaseBot:
 
         url = f"{self.API_URL}referral?referral_code={self.get_ref_id()}&auth_data={self._init_data}"
         return await self.make_request("GET", url)
-
-    async def fetch_power_data(self) -> Optional[Dict[str, Any]]:
-        if not self._init_data:
-            await self.get_tg_web_data()
-
-        url = f"{self.API_URL}users/powers?auth_data={self._init_data}"
-        return await self.make_request("GET", url)
-
-    def _generate_payload(self) -> Dict[str, Union[int, float]]:
-        values = [75, 80, 85, 90, 95, 100]
-        return {
-            "from_date": int(time() * 1000),
-            "quality_connection": values[randint(0, len(values) - 1)]
-        }
-
-    async def contribute(self) -> Optional[Dict[str, Any]]:
-        if not self._init_data:
-            await self.get_tg_web_data()
-
-        url = f"{self.API_URL}engine/contribute?auth_data={self._init_data}"
-        payload = self._generate_payload()
-
-        return await self.make_request(
-            "POST",
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json"}
-        )
 
     async def fetch_missions(self) -> Optional[Dict[str, Any]]:
         if not self._init_data:
@@ -385,6 +375,7 @@ class BaseBot:
         url = f"{self.API_URL}daily-tasks/complete?task_id={task_id}&auth_data={self._init_data}"
         result = await self.make_request("GET", url)
         return result is not None and result.get("result") == "done"
+
     async def process_missions(self) -> None:
         try:
             missions_data = await self.fetch_missions()
@@ -514,6 +505,114 @@ class BaseBot:
         url = f"{self.API_URL}referral?referral_code={self.get_ref_id()}&auth_data={self._init_data}"
         await self.make_request("GET", url)
 
+    async def contribute(self) -> Optional[Dict]:
+        if not self._init_data:
+            await self.get_tg_web_data()
+        
+        timestamp = int(time() * 1000)
+        url = f"{self.API_URL}engine/contribute?auth_data={self._init_data}"
+        
+        headers = {
+            'accept': 'application/json',
+            'accept-language': 'ru,en-US;q=0.9,en;q=0.8',
+            'cache-control': 'no-cache',
+            'content-type': 'application/json',
+            'dnt': '1',
+            'origin': 'https://app.hivera.org',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://app.hivera.org/',
+            'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': self._user_agent
+        }
+        
+        data = {
+            "from_date": timestamp,
+            "quality_connection": randint(85, 95)
+        }
+        
+        try:
+            result = await self.make_request(
+                method="POST",
+                url=url,
+                headers=headers,
+                json=data
+            )
+
+            if result:
+                if "result" in result and "profile" in result["result"]:
+                    profile = result["result"]["profile"]
+                    self._power = profile.get("POWER", 0)
+                    self._hivera = profile.get("HIVERA", 0)
+                    self._power_capacity = profile.get("POWER_CAPACITY", 0)
+                elif "error" in result:
+                    info_url = f"{self.API_URL}engine/info?auth_data={self._init_data}"
+                    info_data = await self.make_request("GET", info_url)
+                    if info_data and "result" in info_data and "profile" in info_data["result"]:
+                        profile = info_data["result"]["profile"]
+                        self._power = profile.get("POWER", 0)
+                        self._hivera = profile.get("HIVERA", 0)
+                        self._power_capacity = profile.get("POWER_CAPACITY", 0)
+                    else:
+                        logger.error(f"❌ {self.session_name} | Failed to get info data")
+            else:
+                logger.error(f"❌ {self.session_name} | Empty response from contribute")
+
+            return result
+        except Exception as e:
+            logger.error(f"❌ {self.session_name} | Contribute error: {str(e)}")
+            return None
+
+    async def calculate_power_restore_rate(self) -> float:
+        current_time = time()
+        
+        if self._last_power_check is None or self._last_power_value is None:
+            self._last_power_check = current_time
+            self._last_power_value = self._power
+            return self._power_restore_rate
+        
+        time_diff = current_time - self._last_power_check
+        power_diff = self._power - self._last_power_value
+        
+        if time_diff > 0:
+            new_rate = power_diff / time_diff
+            
+            if time_diff >= 5 and power_diff > 0:
+                if 0.5 <= new_rate <= 10:
+                    self._power_restore_rate = new_rate
+                    logger.debug(
+                        f"📊 {self.session_name} | "
+                        f"Power restore rate updated: {new_rate:.2f} power/s | "
+                        f"Power diff: {power_diff} | Time diff: {time_diff:.1f}s"
+                    )
+                else:
+                    logger.debug(
+                        f"📊 {self.session_name} | "
+                        f"Skipped invalid rate: {new_rate:.2f} power/s | "
+                        f"Power diff: {power_diff} | Time diff: {time_diff:.1f}s"
+                    )
+        
+        if time_diff >= 5:
+            self._last_power_check = current_time
+            self._last_power_value = self._power
+        
+        return self._power_restore_rate
+
+    async def send_activities(self) -> None:
+        """Отправка activities каждые 30 секунд"""
+        while True:
+            try:
+                url = f"{self.API_URL}engine/activities?auth_data={self._init_data}"
+                await self.make_request("GET", url)
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.error(f"❌ {self.session_name} | Activities error: {str(e)}")
+                await asyncio.sleep(30)
 
 async def run_tapper(tg_client: UniversalTelegramClient):
     bot = BaseBot(tg_client=tg_client)

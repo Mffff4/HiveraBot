@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     BLACKLISTED_SESSIONS: str = ""
 
     POWER_RESTORE_DELAY: Tuple[int, int] = (15 * 60, 60 * 60)
-    MINING_DELAY: Tuple[int, int] = (10, 30)
+    MINING_DELAY: Tuple[int, int] = (30, 90)
     MISSION_DELAY: Tuple[int, int] = (5, 10)
 
     @property

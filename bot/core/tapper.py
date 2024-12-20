@@ -231,7 +231,7 @@ class BaseBot:
             missions_task = asyncio.create_task(self.process_missions())
 
             last_power = 0
-            stuck_counter = 0
+            last_check_time = time()
             
             while True:
                 power_data = await self.fetch_power_data()
@@ -243,24 +243,31 @@ class BaseBot:
                 self._power = result.get("POWER", 0)
                 power_capacity = result.get("POWER_CAPACITY", 0)
 
-                if self._power == last_power:
-                    stuck_counter += 1
-                else:
-                    stuck_counter = 0
-                    
-                last_power = self._power
-
-                if stuck_counter >= 2:
+                current_time = time()
+                time_passed = current_time - last_check_time
+                expected_power_gain = int(time_passed * 4)  # 4 энергии в секунду
+                
+                # Проверяем, растет ли энергия как ожидается
+                actual_power_gain = self._power - last_power
+                if actual_power_gain < expected_power_gain - 10:  # Допускаем погрешность в 10 единиц
                     logger.warning(
                         f"⚠️ {self.session_name} | "
-                        f"Power stuck at {self._power}. Refreshing data..."
+                        f"Power gain slower than expected: got {actual_power_gain}, expected {expected_power_gain}"
                     )
                     await asyncio.sleep(5)
-                    stuck_counter = 0
+                    last_check_time = current_time
+                    last_power = self._power
                     continue
 
+                last_power = self._power
+                last_check_time = current_time
+
                 if self._power <= 500:
-                    delay = uniform(45, 60)
+                    # Рассчитываем время до достижения 501 энергии
+                    power_needed = 501 - self._power
+                    delay = power_needed / 4 + 1  # +1 секунда для надежности
+                    delay = min(delay, 120)  # Максимальная задержка 2 минуты
+                    
                     logger.warning(
                         f"⚠️ {self.session_name} | "
                         f"User {self._username} | Power: {self._power}/{power_capacity}"
@@ -268,7 +275,6 @@ class BaseBot:
                     await asyncio.sleep(delay)
                     continue
 
-                stuck_counter = 0
                 contribute_data = await self.contribute()
                 if contribute_data:
                     profile = contribute_data.get("result", {}).get("profile", {})
@@ -384,7 +390,12 @@ class BaseBot:
             missions_data = await self.fetch_missions()
             if missions_data and "result" in missions_data:
                 for mission in missions_data["result"]:
-                    if mission["type"] in ["invite_friend", "buy_coffee"]:
+                    # Пропускаем задания, которые требуют реальных действий/платежей
+                    if (
+                        mission["type"] in ["invite_friend", "donation"] or
+                        "Buy Hivera" in mission.get("name", "") or
+                        mission.get("cost", {}).get("TON") is not None
+                    ):
                         continue
 
                     if not mission["complete"]:

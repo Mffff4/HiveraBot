@@ -230,6 +230,7 @@ class BaseBot:
             await self.activate_referral()
             missions_task = asyncio.create_task(self.process_missions())
 
+            power_check_attempts = 0
             while True:
                 power_data = await self.fetch_power_data()
                 if not power_data:
@@ -241,15 +242,36 @@ class BaseBot:
                 power_capacity = profile.get("POWER_CAPACITY", 0)
 
                 if self._power <= 500:
-                    delay = uniform(settings.POWER_RESTORE_DELAY[0], settings.POWER_RESTORE_DELAY[1])
+                    power_check_attempts += 1
+                    
+                    if power_check_attempts >= 3:
+                        logger.warning(
+                            f"⚠️ {self.session_name} | "
+                            f"Power seems stuck at {self._power}. Refreshing session..."
+                        )
+                        self._init_data = None
+                        await self.get_tg_web_data()
+                        power_check_attempts = 0
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    power_needed = 501 - self._power
+                    seconds_to_wait = power_needed / 4
+                    delay = min(
+                        seconds_to_wait + 5,
+                        uniform(settings.POWER_RESTORE_DELAY[0], settings.POWER_RESTORE_DELAY[1])
+                    )
+                    
                     logger.warning(
                         f"⚠️ {self.session_name} | "
-                        f"User {self._username} does not have enough power. "
-                        f"Cooling down for {int(delay/60)} minutes."
+                        f"User {self._username} | Power: {self._power}/{power_capacity} | "
+                        f"Waiting {int(delay)} seconds for power restoration"
                     )
                     await asyncio.sleep(delay)
                     continue
 
+                power_check_attempts = 0
+                
                 contribute_data = await self.contribute()
                 if contribute_data:
                     profile = contribute_data.get("result", {}).get("profile", {})

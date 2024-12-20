@@ -317,10 +317,8 @@ class BaseBot:
                         )
                         await asyncio.sleep(restore_delay)
                     elif error == "locking status":
-                        logger.warning(f"⚠️ {self.session_name} | Account is locked, waiting 60s")
                         await asyncio.sleep(60)
                     elif error == "invalid invite code":
-                        logger.debug(f"📝 {self.session_name} | Invalid invite code, continuing")
                         continue
                     else:
                         logger.error(f"❌ {self.session_name} | Mining error: {error}")

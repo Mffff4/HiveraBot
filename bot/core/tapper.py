@@ -230,7 +230,9 @@ class BaseBot:
             await self.activate_referral()
             missions_task = asyncio.create_task(self.process_missions())
 
-            power_check_attempts = 0
+            last_power = 0
+            stuck_counter = 0
+            
             while True:
                 power_data = await self.fetch_power_data()
                 if not power_data:
@@ -241,37 +243,35 @@ class BaseBot:
                 self._power = profile.get("POWER", 0)
                 power_capacity = profile.get("POWER_CAPACITY", 0)
 
-                if self._power <= 500:
-                    power_check_attempts += 1
+                if self._power == last_power:
+                    stuck_counter += 1
+                else:
+                    stuck_counter = 0
                     
-                    if power_check_attempts >= 3:
-                        logger.warning(
-                            f"⚠️ {self.session_name} | "
-                            f"Power seems stuck at {self._power}. Refreshing session..."
-                        )
-                        self._init_data = None
-                        await self.get_tg_web_data()
-                        power_check_attempts = 0
-                        await asyncio.sleep(5)
-                        continue
-                    
-                    power_needed = 501 - self._power
-                    seconds_to_wait = power_needed / 4
-                    delay = min(
-                        seconds_to_wait + 5,
-                        uniform(settings.POWER_RESTORE_DELAY[0], settings.POWER_RESTORE_DELAY[1])
+                last_power = self._power
+
+                if stuck_counter >= 3:
+                    logger.warning(
+                        f"⚠️ {self.session_name} | "
+                        f"Power stuck at {self._power}. Forcing data refresh..."
                     )
-                    
+                    self._init_data = None
+                    await self.get_tg_web_data()
+                    await asyncio.sleep(5)
+                    stuck_counter = 0
+                    continue
+
+                if self._power <= 500:
+                    delay = 30
                     logger.warning(
                         f"⚠️ {self.session_name} | "
                         f"User {self._username} | Power: {self._power}/{power_capacity} | "
-                        f"Waiting {int(delay)} seconds for power restoration"
+                        f"Checking again in {delay} seconds"
                     )
                     await asyncio.sleep(delay)
                     continue
 
-                power_check_attempts = 0
-                
+                stuck_counter = 0
                 contribute_data = await self.contribute()
                 if contribute_data:
                     profile = contribute_data.get("result", {}).get("profile", {})
@@ -328,7 +328,7 @@ class BaseBot:
         if not self._init_data:
             await self.get_tg_web_data()
 
-        url = f"{self.API_URL}engine/info?auth_data={self._init_data}"
+        url = f"{self.API_URL}engine/info?auth_data={self._init_data}&_t={int(time() * 1000)}"
         return await self.make_request("GET", url)
 
     def _generate_payload(self) -> Dict[str, Union[int, float]]:

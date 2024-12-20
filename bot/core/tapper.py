@@ -388,33 +388,54 @@ class BaseBot:
     async def process_missions(self) -> None:
         try:
             missions_data = await self.fetch_missions()
-            if missions_data and "result" in missions_data:
-                for mission in missions_data["result"]:
-                    # Пропускаем задания, которые требуют реальных действий/платежей
+            if not missions_data or "result" not in missions_data:
+                logger.warning(f"⚠️ {self.session_name} | Failed to fetch missions data")
+                return
+
+            for mission in missions_data["result"]:
+                try:
                     if (
-                        mission["type"] in ["invite_friend", "donation"] or
+                        mission.get("type") in ["invite_friend", "donation"] or
                         "Buy Hivera" in mission.get("name", "") or
                         mission.get("cost", {}).get("TON") is not None
                     ):
                         continue
 
-                    if not mission["complete"]:
-                        mission_id = mission["id"]
-                        if await self.complete_mission(mission_id):
-                            logger.info(f"✅ {self.session_name} | Completed mission {mission['name']}")
+                    if not mission.get("complete", True):
+                        mission_id = mission.get("id")
+                        if not mission_id:
+                            continue
+                            
+                        result = await self.complete_mission(mission_id)
+                        if result:
+                            logger.info(f"✅ {self.session_name} | Completed mission {mission.get('name', 'Unknown')}")
                             await asyncio.sleep(uniform(settings.MISSION_DELAY[0], settings.MISSION_DELAY[1]))
+                except Exception as mission_error:
+                    logger.error(f"❌ {self.session_name} | Error processing mission {mission.get('name', 'Unknown')}: {str(mission_error)}")
+                    continue
 
             daily_tasks = await self.fetch_daily_tasks()
-            if daily_tasks and "result" in daily_tasks:
-                for task in daily_tasks["result"]:
-                    if task["type"] == "restore_power":
+            if not daily_tasks or "result" not in daily_tasks:
+                logger.warning(f"⚠️ {self.session_name} | Failed to fetch daily tasks data")
+                return
+
+            for task in daily_tasks["result"]:
+                try:
+                    if task.get("type") == "restore_power":
                         continue
 
-                    if not task["complete"]:
-                        task_id = task["id"]
-                        if await self.complete_daily_task(task_id):
-                            logger.info(f"✅ {self.session_name} | Completed daily task {task['name']}")
+                    if not task.get("complete", True):
+                        task_id = task.get("id")
+                        if not task_id:
+                            continue
+                            
+                        result = await self.complete_daily_task(task_id)
+                        if result:
+                            logger.info(f"✅ {self.session_name} | Completed daily task {task.get('name', 'Unknown')}")
                             await asyncio.sleep(uniform(settings.MISSION_DELAY[0], settings.MISSION_DELAY[1]))
+                except Exception as task_error:
+                    logger.error(f"❌ {self.session_name} | Error processing daily task {task.get('name', 'Unknown')}: {str(task_error)}")
+                    continue
 
         except Exception as e:
             logger.error(f"❌ {self.session_name} | Error processing missions: {str(e)}")

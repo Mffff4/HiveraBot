@@ -156,7 +156,6 @@ class BaseBot:
             headers.update(kwargs.pop('headers'))
         kwargs['headers'] = headers
 
-        # Ошибки, которые мы считаем допустимыми
         VALID_ERRORS = {
             "insufficient power",
             "invalid invite code",
@@ -172,65 +171,64 @@ class BaseBot:
                     parts = url.split("auth_data=")
                     url = f"{parts[0]}auth_data={urlencode({'data': parts[1]}).split('data=')[1]}"
 
-                if settings.DEBUG_LOGGING:
-                    logger.debug(
-                        f"📝 {self.session_name} | Making request:\n"
-                        f"Method: {method}\n"
-                        f"URL: {url}\n"
-                        f"Headers: {json.dumps(headers, indent=2)}\n"
-                        f"Args: {json.dumps(kwargs, indent=2)}"
-                    )
-
                 async with getattr(self._http_client, method.lower())(url, **kwargs) as response:
                     response_text = await response.text()
                     
-                    if settings.DEBUG_LOGGING:
-                        logger.debug(
-                            f"📝 {self.session_name} | Response:\n"
+                    if response.status != 200:
+                        logger.error(
+                            f"❌ {self.session_name} | Response error:\n"
                             f"Status: {response.status}\n"
+                            f"URL: {url}\n"
                             f"Headers: {json.dumps(dict(response.headers), indent=2)}\n"
-                            f"Cookies: {response.cookies}\n"
                             f"Body: {response_text}"
                         )
 
                     if "Error 1015" in response_text or "You are being rate limited" in response_text:
                         if attempt < max_retries - 1:
                             delay = retry_delay * (attempt + 1)
-                            logger.warning(
-                                f"⚠️ {self.session_name} | "
-                                f"Cloudflare rate limit detected (attempt {attempt + 1}/{max_retries}). "
-                                f"Waiting {delay}s before retry..."
-                            )
+                            logger.warning(f"⚠️ {self.session_name} | Cloudflare block, waiting {delay}s...")
                             await asyncio.sleep(delay)
                             continue
-                        else:
-                            logger.error(f"❌ {self.session_name} | Cloudflare rate limit persists after {max_retries} attempts")
-                            return None
+                        return None
 
                     try:
                         result = json.loads(response_text) if response_text else None
                     except json.JSONDecodeError:
                         if "<!DOCTYPE html>" in response_text:
-                            logger.error(f"❌ {self.session_name} | Received HTML instead of JSON, possible Cloudflare block")
                             if attempt < max_retries - 1:
                                 delay = retry_delay * (attempt + 1)
-                                logger.warning(f"⚠️ {self.session_name} | Retrying in {delay}s...")
+                                logger.warning(f"⚠️ {self.session_name} | Got HTML response, retrying in {delay}s")
                                 await asyncio.sleep(delay)
                                 continue
-                        else:
-                            logger.error(f"❌ {self.session_name} | Failed to parse JSON response")
+                            return None
+                        
+                        if not response_text.strip():
+                            if attempt < max_retries - 1:
+                                logger.warning(f"⚠️ {self.session_name} | Empty response, retrying...")
+                                await asyncio.sleep(retry_delay)
+                                continue
+                            return None
+                        
+                        logger.error(
+                            f"❌ {self.session_name} | JSON parse error:\n"
+                            f"URL: {url}\n"
+                            f"Response text: {response_text}"
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
                         return None
 
                     if hasattr(self._http_client, 'cookie_jar'):
                         self._http_client.cookie_jar.update_cookies(response.cookies)
 
-                    # Считаем ответ валидным если это одна из обрабатываемых ошибок
-                    if response.status != 200 and (
-                        not result or 
-                        "error" not in result or 
-                        result["error"] not in VALID_ERRORS
-                    ):
-                        logger.error(f"❌ {self.session_name} | Request failed with status {response.status}: {response_text}")
+                    if result and "error" in result and result["error"] in VALID_ERRORS:
+                        return result
+
+                    if response.status != 200:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
                         return None
 
                     return result
@@ -238,13 +236,13 @@ class BaseBot:
             except aiohttp.ClientError as e:
                 logger.error(f"❌ {self.session_name} | Network error: {str(e)}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(retry_delay)
                     continue
                 return None
             except Exception as e:
                 logger.error(f"❌ {self.session_name} | Request error: {str(e)}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(retry_delay)
                     continue
                 return None
 
@@ -290,10 +288,14 @@ class BaseBot:
             missions_task = asyncio.create_task(self.process_missions())
 
             activities_task = None
+            logo_task = None
 
             while True:
                 if activities_task is None or activities_task.done():
                     activities_task = asyncio.create_task(self.send_activities())
+                
+                if logo_task is None or logo_task.done():
+                    logo_task = asyncio.create_task(self.request_logo())
 
                 contribute_data = await self.contribute()
                 if not contribute_data:
@@ -523,11 +525,12 @@ class BaseBot:
         await self.make_request("GET", url)
 
     async def contribute(self) -> Optional[Dict]:
+        """Майнинг через v2/engine/contribute"""
         if not self._init_data:
             await self.get_tg_web_data()
         
         timestamp = int(time() * 1000)
-        url = f"{self.API_URL}engine/contribute?auth_data={self._init_data}"
+        url = f"{self.API_URL}v2/engine/contribute?auth_data={self._init_data}"
         
         headers = {
             'accept': 'application/json',
@@ -550,7 +553,8 @@ class BaseBot:
         
         data = {
             "from_date": timestamp,
-            "quality_connection": randint(85, 95)
+            "quality_connection": randint(85, 95),
+            "times": 1
         }
         
         try:
@@ -577,8 +581,8 @@ class BaseBot:
                         self._power_capacity = profile.get("POWER_CAPACITY", 0)
                     else:
                         logger.error(f"❌ {self.session_name} | Failed to get info data")
-            else:
-                logger.error(f"❌ {self.session_name} | Empty response from contribute")
+                else:
+                    logger.error(f"❌ {self.session_name} | Empty response from contribute")
 
             return result
         except Exception as e:
@@ -630,6 +634,37 @@ class BaseBot:
             except Exception as e:
                 logger.error(f"❌ {self.session_name} | Activities error: {str(e)}")
                 await asyncio.sleep(30)
+
+    async def request_logo(self) -> None:
+        """Запрос logo.png каждую секунду"""
+        while True:
+            try:
+                headers = {
+                    'accept': '*/*',
+                    'accept-language': 'ru,en-US;q=0.9,en;q=0.8',
+                    'baggage': 'sentry-environment=production,sentry-release=5d7515cb326716016e6209d847ff4d6a484fe6e2,sentry-public_key=980928cd76789d6bd22ca2fbf961fa16,sentry-trace_id=c079ec0e17134a40b50ec0f9dacbf329',
+                    'cache-control': 'no-cache',
+                    'dnt': '1',
+                    'pragma': 'no-cache',
+                    'priority': 'u=1, i',
+                    'referer': 'https://app.hivera.org/',
+                    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"macOS"',
+                    'sec-fetch-dest': 'empty',
+                    'sec-fetch-mode': 'cors',
+                    'sec-fetch-site': 'same-origin',
+                    'sentry-trace': 'c079ec0e17134a40b50ec0f9dacbf329-bf5161f066015c3b',
+                    'user-agent': self._user_agent
+                }
+                
+                url = "https://app.hivera.org/logo.png"
+                async with self._http_client.get(url, headers=headers) as response:
+                    await response.read()
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"❌ {self.session_name} | Logo request error: {str(e)}")
+                await asyncio.sleep(1)
 
 async def run_tapper(tg_client: UniversalTelegramClient):
     bot = BaseBot(tg_client=tg_client)

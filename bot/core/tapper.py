@@ -399,7 +399,7 @@ class BaseBot:
             daily_tasks = await self.fetch_daily_tasks()
             if daily_tasks and "result" in daily_tasks:
                 for task in daily_tasks["result"]:
-                    if task["type"] in ["restore_power", "buy_coffee"]:
+                    if task["type"] == "restore_power":
                         continue
 
                     if not task["complete"]:

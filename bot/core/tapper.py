@@ -297,6 +297,21 @@ class BaseBot:
                 if logo_task is None or logo_task.done():
                     logo_task = asyncio.create_task(self.request_logo())
 
+                if self._power is not None and self._power <= 0:
+                    restore_delay = uniform(
+                        settings.POWER_RESTORE_DELAY[0],
+                        settings.POWER_RESTORE_DELAY[1]
+                    )
+                    next_mining_time = datetime.now() + timedelta(seconds=restore_delay)
+                    logger.warning(
+                        f"⚠️ {self.session_name} | "
+                        f"Power: {self._power}/{self._power_capacity} | "
+                        f"Insufficient power, waiting {int(restore_delay)}s | "
+                        f"Next mining at: {next_mining_time.strftime('%H:%M:%S')}"
+                    )
+                    await asyncio.sleep(restore_delay)
+                    continue
+
                 contribute_data = await self.contribute()
                 if not contribute_data:
                     logger.error(f"❌ {self.session_name} | Failed to get contribute data")
